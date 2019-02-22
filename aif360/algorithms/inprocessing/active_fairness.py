@@ -52,6 +52,12 @@ class TreeProcess:
         node_trace = []
         self.children_left = tree.children_left
         self.children_right = tree.children_right
+        child_left_dict = {}
+        child_right_dict = {}
+        for i in range(len(self.children_left)):
+            child_left_dict[i] = self.children_left[i]
+        for i in range(len(self.children_right)):
+            child_right_dict[i] = self.children_right[i]
         self.threshold = tree.threshold
         self.feature = tree.feature
         self.values = tree.value
@@ -113,8 +119,6 @@ class TreeProcess:
                 right_node = self.children_right[rootNode]
                 self.node_traverse(result_list, right_node, feature)# get all non-leaf nodes of this feature in the right sub-tree
                 self.feature2nodes[feature].children_right = result_list
-
-            # find the target
             
             while queue:
                 current_node = queue.pop(0)
@@ -135,7 +139,6 @@ class TreeProcess:
                     result_set = set()
                     self.node_traverse_leaf(result_set, left_node) 
                     self.nodeid2TreeNode[current_node].node_set[0] = result_set # get all leaf nodes it can reach in the left sub-tree
-
                     result_set = set()
                     self.node_traverse_leaf(result_set, right_node)
                     self.nodeid2TreeNode[current_node].node_set[1] = result_set # get all leaf nodes it can reach in the right sub-tree
@@ -144,6 +147,7 @@ class TreeProcess:
                     # if not the leaf
                     queue.append(self.children_left[current_node])
                     queue.append(self.children_right[current_node])
+
 
         for feature in all_features:
             threshold_set = set()
@@ -165,6 +169,8 @@ class TreeProcess:
 
         for feature in self.feature2threshold_list.keys():
             l = len(self.feature2threshold_list[feature])
+            if l == 0:
+                continue
             for i in range(l):
                 threshold = self.feature2threshold_list[feature][i]
                 delete_set_equal_or_less = set() # the nodes to be deleted if equal or less than the threshold
@@ -187,36 +193,33 @@ class TreeProcess:
                                 queue.append(self.nodeid2TreeNode[node])
                             delete_set_equal_or_less |= currentTreeNode.node_set[0]    
 
-                dummy_threshold = threshold + 1e-10 # make the current threshold slightly higher than the actual threshold
 
-                if i < l - 1:
-                    # prevent possible bugs
-                    assert dummy_threshold < self.feature2threshold_list[feature][i+1], "threshold error" 
+                self.featureAndthreshold2delete_set[feature][threshold] = delete_set_equal_or_less
 
-                delete_set_larger = set() # the nodes to be deleted if equal or larger than the threshold
-                queue = [self.feature2nodes[feature]] # the first one
-                while queue:
-                    currentTreeNode = queue.pop(0)
-                    if currentTreeNode.dummy == True:
-                        for node in currentTreeNode.children_left:
-                            queue.append(self.nodeid2TreeNode[node])
-                        for node in currentTreeNode.children_right:
-                            queue.append(self.nodeid2TreeNode[node])
-                    else:
-                        if dummy_threshold <= currentTreeNode.threshold:
-                            for node in currentTreeNode.children_left:
-                                queue.append(self.nodeid2TreeNode[node])
-                            delete_set_larger |= currentTreeNode.node_set[1]
-                        else:
-                            for node in currentTreeNode.children_right:
-                                queue.append(self.nodeid2TreeNode[node])
-                            delete_set_larger |= currentTreeNode.node_set[0]    
 
-                self.featureAndthreshold2delete_set[feature][threshold] = [delete_set_equal_or_less, delete_set_larger]
+            delete_set_larger = set() # the nodes to be deleted if larger than the threshold
+            queue = [self.feature2nodes[feature]] # the root of feature tree
+            while queue:
+                currentTreeNode = queue.pop(0)
+                if currentTreeNode.dummy == True:
+                    for node in currentTreeNode.children_left:
+                        queue.append(self.nodeid2TreeNode[node])
+                    for node in currentTreeNode.children_right:
+                        queue.append(self.nodeid2TreeNode[node])
+                else:
+                    for node in currentTreeNode.children_right:
+                        queue.append(self.nodeid2TreeNode[node])
+                    delete_set_larger |= currentTreeNode.node_set[0]    
+
+            self.featureAndthreshold2delete_set[feature][np.inf] = delete_set_larger
 
         for feature in self.feature2threshold_list.keys():
             if len(self.feature2threshold_list[feature]) > 0:
                 self.unique_feature.add(feature)
+
+
+
+
 
     def node_traverse_leaf(self,
                         result_set,
@@ -286,13 +289,11 @@ class ActiveFairness(object):
         if train == True:
             Y_tr_predict = self.clf.predict(self.X_tr)
             re_dataset_train = deepcopy(self.dataset_train)
-            # re_dataset_train.metadata["params"]["df"][self.target_label[0]] = Y_tr_predict
             re_dataset_train.labels = Y_tr_predict
             return re_dataset_train
         else:
             Y_te_predict = self.clf.predict(self.X_te)
             re_dataset_test = deepcopy(self.dataset_test)
-            # re_dataset_test.metadata["params"]["df"][self.target_label[0]] = Y_te_predict
             re_dataset_test.labels = Y_te_predict
             return re_dataset_test
 
@@ -338,7 +339,7 @@ class ActiveFairness(object):
 
         ser_p = [pd.Series(results[i]['p_list'], name=results[i]['index']) for i in range(len(results))]
         df_p = pd.concat(ser_p,axis=1).transpose()
-        df_p = (1-df_p) #correcting because somehow the p's are inversed
+        # df_p = (1-df_p) #correcting because somehow the p's are inversed
 
         ser_qa = [pd.Series(results[i]['qa'], name=results[i]['index']) for i in range(len(results))]
         df_qa = pd.concat(ser_qa,axis=1).transpose()
@@ -398,6 +399,7 @@ def run_per_test_case(test_case_id, X_tr, y_tr, X_te, y_te, verbose, new_feat_mo
         else:
             raise Exception('mode has not been implemented')
         p_dict, p_cur = calcPValuesPerTree(test_example_full, forestProcess, previous_answers, new_feature)
+
         p.append(p_cur)
 
         features.remove(new_feature)
@@ -448,21 +450,17 @@ def run_per_test_case(test_case_id, X_tr, y_tr, X_te, y_te, verbose, new_feat_mo
 def ClassifyWithPartialFeatures(sampleData,tree, previous_answers, new_feature):
     
     value = sampleData[new_feature]
+    assert np.isnan(value) == False, "Value error in ClassifyWithPartialFeatures"
     l = len(tree.feature2threshold_list[new_feature])
     if l > 0:
         Larger_than_all = True
         for i in range(l):
             if value <= tree.feature2threshold_list[new_feature][i]:
                 Larger_than_all = False
-                if i == 0:
-                    previous_answers -= tree.featureAndthreshold2delete_set[new_feature][tree.feature2threshold_list[new_feature][i]][0]
-                else:
-                    previous_answers -= tree.featureAndthreshold2delete_set[new_feature][tree.feature2threshold_list[new_feature][i - 1]][1]
-                    previous_answers -= tree.featureAndthreshold2delete_set[new_feature][tree.feature2threshold_list[new_feature][i]][0]
+                previous_answers -= tree.featureAndthreshold2delete_set[new_feature][tree.feature2threshold_list[new_feature][i]]
                 break
-
         if Larger_than_all == True:
-            previous_answers -= tree.featureAndthreshold2delete_set[new_feature][tree.feature2threshold_list[new_feature][l - 1]][1]
+            previous_answers -= tree.featureAndthreshold2delete_set[new_feature][np.inf]
 
     total_w = 0
     total_probs = np.zeros(tree.tree_single_value_shape, dtype = np.float32)
@@ -514,7 +512,7 @@ def getTheNextBestFeature(forest, features, test_example, previous_answers, p_cu
 def calcPValuesPerTree(test_example, forest, previous_answers, new_feature):
 
     p_list = [ClassifyWithPartialFeatures(test_example,tree, previous_answers[i], new_feature)[0] for i, tree in enumerate(forest)]
-    return p_list,np.mean(p_list)
+    return p_list, np.mean(p_list)
 
 class calibration(object):
     def __init__(self,method= 'sigmoid'):
