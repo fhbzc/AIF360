@@ -381,7 +381,7 @@ def run_per_test_case(test_case_id, X_tr, y_tr, X_te, y_te, verbose, new_feat_mo
         assert static_threshold != -1, "Static threshold must be set if static limit is set"
         upper_bound = min(static_threshold, len(features))
     else:
-    	upper_bound = len(features)
+        upper_bound = len(features)
     time_stop2 = time.time()
 
     previous_answers = [tree.total_leaf_id.copy() for tree in forestProcess]
@@ -390,21 +390,23 @@ def run_per_test_case(test_case_id, X_tr, y_tr, X_te, y_te, verbose, new_feat_mo
 
         if new_feat_mode == 'random':
             new_feature = random.sample(features,1)[0]
+            features.remove(new_feature)
         elif new_feat_mode == 'feat-imp':
             new_feature = features_by_importance[question_i]
         elif new_feat_mode == 'ask-town':
             new_feature = getTheNextBestFeature(forestProcess, features, test_example, previous_answers, p_cur, absolutes_on=False)
+            features.remove(new_feature)
         elif new_feat_mode == 'abs-agg':
             new_feature = getTheNextBestFeature(forestProcess, features, test_example, previous_answers, p_cur)
+            features.remove(new_feature)
         else:
             raise Exception('mode has not been implemented')
         p_dict, p_cur = calcPValuesPerTree(test_example_full, forestProcess, previous_answers, new_feature)
 
         p.append(p_cur)
-
-        features.remove(new_feature)
+        
         question_asked.append(new_feature)
-        test_example[new_feature] = test_example_full[new_feature]
+        # test_example[new_feature] = test_example_full[new_feature]
 
         if verbose >= 3:
             print()  
@@ -447,31 +449,39 @@ def run_per_test_case(test_case_id, X_tr, y_tr, X_te, y_te, verbose, new_feat_mo
 
 
 
-def ClassifyWithPartialFeatures(sampleData,tree, previous_answers, new_feature):
-    
+def ClassifyWithPartialFeatures(sampleData,tree, previous_answers, new_feature, only_norm_prob = False):
+    # only_norm_prob is for accelerating
     value = sampleData[new_feature]
-    assert np.isnan(value) == False, "Value error in ClassifyWithPartialFeatures"
+    # assert np.isnan(value) == False, "Value error in ClassifyWithPartialFeatures"
     l = len(tree.feature2threshold_list[new_feature])
     if l > 0:
-        Larger_than_all = True
-        for i in range(l):
-            if value <= tree.feature2threshold_list[new_feature][i]:
-                Larger_than_all = False
-                previous_answers -= tree.featureAndthreshold2delete_set[new_feature][tree.feature2threshold_list[new_feature][i]]
-                break
-        if Larger_than_all == True:
+        if value > tree.feature2threshold_list[new_feature][l - 1]:
             previous_answers -= tree.featureAndthreshold2delete_set[new_feature][np.inf]
+        else:
+            for i in range(l):
+                if value <= tree.feature2threshold_list[new_feature][i]:
+                    previous_answers -= tree.featureAndthreshold2delete_set[new_feature][tree.feature2threshold_list[new_feature][i]]
+                    break
+    # time1 = time.time()
 
     total_w = 0
+    norm_w = 1
     total_probs = np.zeros(tree.tree_single_value_shape, dtype = np.float32)
+    
+    if only_norm_prob == False:
+        for node in previous_answers:
+            total_probs += tree.values[node]
+            total_w += tree.weighted_samples[node]
 
-    for node in previous_answers:
-        total_probs += tree.values[node]
-        total_w += tree.weighted_samples[node]
-
-    norm_w = total_w / tree.weighted_samples[tree.feature == -2].sum()
-    norm_probs = total_probs[0]/total_probs[0].sum()
-
+        norm_w = total_w / tree.weighted_samples[tree.feature == -2].sum()
+        norm_probs = total_probs[0]/total_probs[0].sum()
+    else:
+        for node in previous_answers:
+            total_probs += tree.values[node]
+        norm_probs = total_probs[0]/total_probs[0].sum()
+    # time2 = time.time()
+    # print("time 4", time1 - start_time)
+    # print("time 5", time2 - time1)
     return norm_probs[0], norm_w  # also return the weight
 
 def getTheNextBestFeature(forest, features, test_example, previous_answers, p_cur = -1, absolutes_on=True):
@@ -511,7 +521,37 @@ def getTheNextBestFeature(forest, features, test_example, previous_answers, p_cu
 
 def calcPValuesPerTree(test_example, forest, previous_answers, new_feature):
 
-    p_list = [ClassifyWithPartialFeatures(test_example,tree, previous_answers[i], new_feature)[0] for i, tree in enumerate(forest)]
+
+    # p_list = [ClassifyWithPartialFeatures(test_example,tree, previous_answers[i], new_feature, only_norm_prob = True)[0] for i, tree in enumerate(forest)]
+
+    p_list = []
+    # sampleData,tree, previous_answers, new_feature, only_norm_prob = False
+    for i, tree in enumerate(forest):
+        # only_norm_prob is for accelerating
+        value = test_example[new_feature]
+        # assert np.isnan(value) == False, "Value error in ClassifyWithPartialFeatures"
+        l = len(tree.feature2threshold_list[new_feature])
+        if l > 0:
+            if value > tree.feature2threshold_list[new_feature][l - 1]:
+                previous_answers[i] -= tree.featureAndthreshold2delete_set[new_feature][np.inf]
+            else:
+                for j in range(l):
+                    if value <= tree.feature2threshold_list[new_feature][j]:
+                        previous_answers[i] -= tree.featureAndthreshold2delete_set[new_feature][tree.feature2threshold_list[new_feature][j]]
+                        break
+        # time1 = time.time()
+
+        total_probs = np.zeros(tree.tree_single_value_shape, dtype = np.float32)
+        list_previous = list(previous_answers[i])
+        total_probs = np.sum(tree.values[list_previous], axis = 0)
+        # for node in previous_answers[i]:
+        #     total_probs += tree.values[node]
+        norm_probs = total_probs[0]/total_probs[0].sum()
+        # time2 = time.time()
+        # print("time 4", time1 - start_time)
+        # print("time 5", time2 - time1)
+        p_list.append(norm_probs[0])
+
     return p_list, np.mean(p_list)
 
 class calibration(object):
