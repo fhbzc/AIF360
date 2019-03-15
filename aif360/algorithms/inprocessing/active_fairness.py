@@ -263,18 +263,29 @@ class ActiveFairness(object):
 
         assert len(target_label) == 1, print("Error in ActiveFairness, length of target_label not defined")
         train = dataset_train.features
-        test = dataset_test.features
         complete_data = dataset_train.metadata['previous'][0]
+        self.feature2columnmap = {}
+
+        test = dataset_test.features
         feature_name = pd.DataFrame(complete_data.feature_names)
         y_column_index = ~(feature_name.isin(sensitive_features + target_label).iloc[:, 0])
+        y_column_index_inverse = (feature_name.isin(sensitive_features + target_label).iloc[:, 0])
+        index = 0
+        for i in range(len(y_column_index_inverse)):
+            if y_column_index_inverse.iloc[i] == True:
+                self.feature2columnmap[complete_data.feature_names[i]] = index
+                index += 1
         self.target_label = target_label
         self.sensitive_features = sensitive_features
         self.privileged_groups = privileged_groups
         self.unprivileged_groups = unprivileged_groups
         self.dataset_train = dataset_train
         self.dataset_test = dataset_test
+
+        self.X_tr_sensitiveAtarget = pd.DataFrame(train[:, y_column_index_inverse])
         self.X_tr = pd.DataFrame(train[:, y_column_index])
         self.y_tr = pd.DataFrame(self.dataset_train.labels[:, 0]).iloc[:, 0]
+        self.X_te_sensitiveAtarget = pd.DataFrame(test[:, y_column_index_inverse])
         self.X_te = pd.DataFrame(test[:, y_column_index])
         self.y_te = pd.DataFrame(self.dataset_test.labels[:, 0]).iloc[:, 0]
         self.clf = clf
@@ -298,26 +309,35 @@ class ActiveFairness(object):
             return re_dataset_test
 
     def run_algo_in_parallel(self, new_feat_mode,
+                            sensitive_name, 
+                            privilige_variable_value,
+                            unprivilige_variable_value,
+                            pri_num_feature_fetched,
+                            un_pri_num_feature_fetched,
                             verbose=1, 
                             plot_any=False, 
                             batch_size=512, 
                             nr_of_batches=100,
-                             n_jobs=-1, 
+                            n_jobs=-1, 
                             save_to_file=True,
                             run_on_training=False,
-                            save_folder='',
-                            static_threshold = -1):
+                            save_folder=''):
 
         assert (len(save_folder) == 0) or (save_to_file)
         
         X_tr = self.X_tr
         y_tr = self.y_tr
+
+
         if run_on_training:
             X_te = self.X_tr
             y_te = self.y_tr
+            X_sensi_te = self.X_tr_sensitiveAtarget
         else:
             X_te = self.X_te
             y_te = self.y_te
+            X_sensi_te = self.X_te_sensitiveAtarget
+
         clf = self.clf 
         self.trees = [TreeProcess(value.tree_, self.all_features) for value in clf.estimators_]
         all_features = self.all_features
@@ -334,23 +354,26 @@ class ActiveFairness(object):
                 break
 
             print('START',start, 'END', end)
-            results_one = [run_per_test_case(i, X_tr, y_tr, X_te, y_te, verbose, new_feat_mode, clf, start_time2, all_features, features_by_importance, self.trees, static_threshold) for i in list(np.arange(start,end))]
+            results_one = [run_per_test_case(i, X_tr, y_tr, X_te, y_te, X_sensi_te, sensitive_name, privilige_variable_value, \
+                unprivilige_variable_value, pri_num_feature_fetched, un_pri_num_feature_fetched, self.feature2columnmap, \
+                verbose, new_feat_mode, clf, start_time2, all_features, features_by_importance, self.trees) for i in np.arange(start,end)]
             results.extend(results_one)
 
-        ser_p = [pd.Series(results[i]['p_list'], name=results[i]['index']) for i in range(len(results))]
+        l = len(results)
+        ser_p = [pd.Series(results[i]['p_list'], name=results[i]['index']) for i in range(l)]
         df_p = pd.concat(ser_p,axis=1).transpose()
-        # df_p = (1-df_p) #correcting because somehow the p's are inversed
+        df_p = (1-df_p) #correcting because somehow the p's are inversed
 
-        ser_qa = [pd.Series(results[i]['qa'], name=results[i]['index']) for i in range(len(results))]
+        ser_qa = [pd.Series(results[i]['qa'], name=results[i]['index']) for i in range(l)]
         df_qa = pd.concat(ser_qa,axis=1).transpose()
 
-        ser_y = [pd.Series(results[i]['y_te'], name=results[i]['index']) for i in range(len(results))]
+        ser_y = [pd.Series(results[i]['y_te'], name=results[i]['index']) for i in range(l)]
         df_y = pd.concat(ser_y,axis=1).transpose()
         
-        ser_mc = [pd.Series(results[i]['max_conf'], name=results[i]['index']) for i in range(len(results))]
+        ser_mc = [pd.Series(results[i]['max_conf'], name=results[i]['index']) for i in range(l)]
         df_mc = pd.concat(ser_mc,axis=1).transpose()
 
-        df_X = pd.concat([results[i]['X_te'] for i in range(len(results))],axis=1).transpose()
+        df_X = pd.concat([results[i]['X_te'] for i in range(l)],axis=1).transpose()
 
         if save_to_file:
             df_p.to_csv('{}/{}_dataframe_p_{}.csv'.format(save_folder,new_feat_mode,ii))
@@ -361,28 +384,35 @@ class ActiveFairness(object):
 
         return df_p, df_qa, df_y, df_mc, df_X # What does this part mean?
 
-def run_per_test_case(test_case_id, X_tr, y_tr, X_te, y_te, verbose, new_feat_mode, clf, start_time2, all_features, features_by_importance, forestProcess, static_threshold = -1):
-    start_time_00 = time.time()
+def run_per_test_case(test_case_id, X_tr, y_tr, X_te, y_te, X_sensi_te, sensitive_name, privilige_variable_value, \
+	unprivilige_variable_value, pri_num_feature_fetched, un_pri_num_feature_fetched,feature2columnmap, \
+	verbose, new_feat_mode, clf, start_time2, all_features, features_by_importance, forestProcess):
+    # start_time_00 = time.time()
     if verbose >= 1:
         if test_case_id % 1 == 0:
             print('Test case', test_case_id,"of",len(y_te))
             print('Time passed', time.time()-start_time2)
             print('Mode', new_feat_mode)
             print()
+    if X_sensi_te.iloc[test_case_id,feature2columnmap[sensitive_name]] == privilige_variable_value:
+        # privilege group
+        budget = pri_num_feature_fetched
+    else:
+        budget = un_pri_num_feature_fetched
+
 
     features = deepcopy(all_features)
     test_example_full = X_te.iloc[test_case_id, :].values.astype(float)
     test_example = test_example_full * np.nan # Initialized as all nan
-    time_stop1 = time.time()
+    # time_stop1 = time.time()
     max_conf = clf.predict_proba(test_example_full.reshape(1,-1))[0][0]
     p = []
     question_asked = []
     if new_feat_mode == 'feat-imp':
-        assert static_threshold != -1, "Static threshold must be set if static limit is set"
-        upper_bound = min(static_threshold, len(features))
+        upper_bound = min(budget, len(features))
     else:
         upper_bound = len(features)
-    time_stop2 = time.time()
+    # time_stop2 = time.time()
 
     previous_answers = [tree.total_leaf_id.copy() for tree in forestProcess]
     p_cur = -1
@@ -417,7 +447,7 @@ def run_per_test_case(test_case_id, X_tr, y_tr, X_te, y_te, verbose, new_feat_mo
             print("feature asked : ", list(X_tr)[new_feature])
             print("feature number asked : ", new_feature)
             print("max conf", max_conf)
-    time_stop3 = time.time()
+    # time_stop3 = time.time()
 
     if verbose >= 2:
         print("Test example's true label: ", y_te.iloc[test_case_id])
