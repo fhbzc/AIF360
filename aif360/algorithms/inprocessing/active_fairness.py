@@ -224,7 +224,7 @@ class TreeProcess:
     def node_traverse_leaf(self,
                         result_set,
                         currentNode):
-
+        # get all leaf nodes which can be reached starting from one node
         nodeFeature = self.feature[currentNode]
         if nodeFeature == -2:
             result_set.add(currentNode)
@@ -254,18 +254,20 @@ class ActiveFairness(object):
     def __init__(self, 
                 dataset_train, dataset_test, 
                 clf,
-                privileged_groups,
-                unprivileged_groups,
                 sensitive_features = [],
-                target_label = [], 
-                print_baselines=True):
+                target_label = []):
 
-
+        '''
+        dataset_train: training dataset, type: MexicoDataset()
+        dataset_test: testing dataset, type: MexicoDataset()
+        clf: trained randomforest classifier
+        sensitive_features: a list of sensitive features which should be removed when doing prediction
+        target_label: a list of features whose values are to be predicted
+        '''
         assert len(target_label) == 1, print("Error in ActiveFairness, length of target_label not defined")
         train = dataset_train.features
         complete_data = dataset_train.metadata['previous'][0]
         self.feature2columnmap = {}
-
         test = dataset_test.features
         feature_name = pd.DataFrame(complete_data.feature_names)
         y_column_index = ~(feature_name.isin(sensitive_features + target_label).iloc[:, 0])
@@ -277,18 +279,17 @@ class ActiveFairness(object):
                 index += 1
         self.target_label = target_label
         self.sensitive_features = sensitive_features
-        self.privileged_groups = privileged_groups
-        self.unprivileged_groups = unprivileged_groups
         self.dataset_train = dataset_train
         self.dataset_test = dataset_test
 
-        self.X_tr_sensitiveAtarget = pd.DataFrame(train[:, y_column_index_inverse])
+        self.X_tr_sensitiveAtarget = pd.DataFrame(train[:, y_column_index_inverse]) # the dataframe of all samples in training dataset which only keeps the non-sensitive and target features
         self.X_tr = pd.DataFrame(train[:, y_column_index])
         self.y_tr = pd.DataFrame(self.dataset_train.labels[:, 0]).iloc[:, 0]
-        self.X_te_sensitiveAtarget = pd.DataFrame(test[:, y_column_index_inverse])
+        self.X_te_sensitiveAtarget = pd.DataFrame(test[:, y_column_index_inverse]) # the dataframe of all samples in testing dataset which only keeps the non-sensitive and target features
         self.X_te = pd.DataFrame(test[:, y_column_index])
         self.y_te = pd.DataFrame(self.dataset_test.labels[:, 0]).iloc[:, 0]
         self.clf = clf
+        self.trees = []
 
     def fit(self): 
         # This is a temporary implementation
@@ -308,6 +309,163 @@ class ActiveFairness(object):
             re_dataset_test.labels = Y_te_predict
             return re_dataset_test
 
+
+
+
+    # choose the appropriate number of features to ask for Group A and B
+    def choose_appropriate_num_of_feature(self, privilige_feature, privilige_value, unprivilige_value, \
+                                          total_budget, feat_method = 'feat-imp', run_on_training = False):
+        num_of_priviledge = 0
+        num_of_unpriviledge = 0
+        dataset = self.X_te_sensitiveAtarget if run_on_training == False else self.X_tr_sensitiveAtarget
+        featured_dataset = self.X_te if run_on_training == False else self.X_tr
+        for i in range(len(dataset)):
+            if dataset.iloc[i, self.feature2columnmap[privilige_feature]] == privilige_value:
+                # priviledge class
+                num_of_priviledge += 1
+            else:
+                assert dataset.iloc[i, self.feature2columnmap[privilige_feature]] == unprivilige_value, "Value incorrect!"
+                num_of_unpriviledge += 1
+        total_num = num_of_priviledge + num_of_unpriviledge
+        current_num_of_feature_for_priviledge = 0
+        current_num_of_feature_for_unpriviledge = 0
+        budget_used = 0
+        # batch_size = 500
+        # nr_of_batches = total_num // batch_size + 2
+        dataset_orig = self.dataset_test if run_on_training == False else self.dataset_train
+        self.trees = [TreeProcess(value.tree_, self.all_features) for value in self.clf.estimators_]
+        
+        features_by_importance = self.features_by_importance
+        last_add_privi = True
+        result = np.zeros([len(dataset)], dtype = np.float32)
+        priviledge_index = []
+        unprivilege_index = []
+        for i in range(len(dataset)):
+            if dataset.iloc[i, self.feature2columnmap[privilige_feature]] == privilige_value:
+                priviledge_index.append(i)
+            else:
+                unprivilege_index.append(i)
+        less_than_pri = np.array(dataset_orig.labels[priviledge_index] <= 0.5, dtype = bool)[:, 0]
+        less_than_unpri = np.array(dataset_orig.labels[unprivilege_index] <= 0.5, dtype = bool)[:, 0]
+
+        previous_answers = [[tree.total_leaf_id.copy() for tree in self.trees] for i in range(len(dataset))]
+
+        print("Start the process")
+
+        while budget_used < total_budget:
+            # FP_pri = 0
+            # TN_pri = 0
+            # FP_unpri = 0
+            # TN_unpri = 0
+            
+            if current_num_of_feature_for_priviledge == 0:
+                FP_pri = 1
+                TN_pri = 0
+            else:
+                privi_predict_result = np.array(result[priviledge_index] > 0.5, dtype = bool)
+                FP_pri = np.sum(privi_predict_result * less_than_pri)
+                TN_pri = np.sum((1 - privi_predict_result) * less_than_pri)
+
+            if current_num_of_feature_for_unpriviledge == 0:
+                FP_unpri = 1
+                TN_unpri = 0
+            else:
+                unprivi_predict_result = np.array(result[unprivilege_index] > 0.5, dtype = bool)
+                FP_unpri = np.sum(unprivi_predict_result * less_than_unpri)
+                TN_unpri = np.sum((1 - unprivi_predict_result) * less_than_unpri)
+
+
+            # for i in range(len(dataset)):
+            #     if dataset.iloc[i, self.feature2columnmap[privilige_feature]] == privilige_value:
+            #         # priviledge class
+            #         if dataset_orig.labels[i] <= 0.5:
+            #             # actual negative
+            #             if current_num_of_feature_for_priviledge == 0:
+            #                 FP_pri += 1
+            #             else:   
+            #                 if result[i] > 0.5:
+            #                     FP_pri += 1
+            #                 else:
+            #                     TN_pri += 1
+            #     else:
+            #         if dataset_orig.labels[i] <= 0.5:
+            #             # actual negative
+            #             if current_num_of_feature_for_unpriviledge == 0:
+            #                 FP_unpri += 1
+            #             else:
+            #                 if result[i] > 0.5:
+            #                     FP_unpri += 1
+            #                 else:
+            #                     TN_unpri += 1
+            FPR_pri = FP_pri * 1.0 / (FP_pri + TN_pri)   
+            FPR_unpri = FP_unpri * 1.0 / (FP_unpri + TN_unpri)   
+            result[:] = 0
+            if FPR_pri > FPR_unpri:
+                current_num_of_feature_for_priviledge += 1
+                last_add_privi = True
+                budget_used += (num_of_priviledge* 1.0 / total_num)
+            else:
+                current_num_of_feature_for_unpriviledge += 1
+                last_add_privi = False
+                budget_used += (num_of_unpriviledge * 1.0 / total_num)
+            print("budget_used", budget_used)
+            print("FPR_pri", FPR_pri)
+            print("FPR_unpri", FPR_unpri)
+            print("FP_pri", FP_pri)
+            print("TN_pri", TN_pri)
+            print("FP_unpri", FP_unpri)
+            print("TN_unpri", TN_unpri)
+
+            features = deepcopy(self.all_features)
+            
+            for j in range(len(dataset)):
+                test_example_full = featured_dataset.iloc[j, :].values.astype(float)
+                if dataset.iloc[j, self.feature2columnmap[privilige_feature]] == privilige_value and last_add_privi == True:
+                    # priviledge class
+                    if feat_method == 'random':
+                        new_feature = random.sample(features,1)[0]
+                        features.remove(new_feature)
+                    elif feat_method == 'feat-imp':
+                        new_feature = features_by_importance[current_num_of_feature_for_priviledge]
+                    elif feat_method == 'ask-town':
+                        assert False, "Error 385, not supported yet"
+                        new_feature = getTheNextBestFeature(self.trees, features, test_example, previous_answers, p_cur, absolutes_on=False)
+                        features.remove(new_feature)
+                    elif feat_method == 'abs-agg':
+                        assert False, "Error 389, not supported yet"
+                        new_feature = getTheNextBestFeature(self.trees, features, test_example, previous_answers, p_cur)
+                        features.remove(new_feature)
+                    else:
+                        raise Exception('mode has not been implemented')
+                    p_dict, p_cur = calcPValuesPerTree(test_example_full, self.trees, previous_answers[j], new_feature)
+                    result[j] = 1 - p_cur # somehow inversed
+                    
+                elif dataset.iloc[j, self.feature2columnmap[privilige_feature]] != privilige_value and last_add_privi == False:
+                    if feat_method == 'random':
+                        new_feature = random.sample(features,1)[0]
+                        features.remove(new_feature)
+                    elif feat_method == 'feat-imp':
+                        new_feature = features_by_importance[current_num_of_feature_for_unpriviledge]
+                    elif feat_method == 'ask-town':
+                        assert False, "Error 385, not supported yet"
+                        new_feature = getTheNextBestFeature(self.trees, features, test_example, previous_answers, p_cur, absolutes_on=False)
+                        features.remove(new_feature)
+                    elif feat_method == 'abs-agg':
+                        assert False, "Error 389, not supported yet"
+                        new_feature = getTheNextBestFeature(self.trees, features, test_example, previous_answers, p_cur)
+                        features.remove(new_feature)
+                    else:
+                        raise Exception('mode has not been implemented')
+                    p_dict, p_cur = calcPValuesPerTree(test_example_full, self.trees, previous_answers[j], new_feature)
+                    result[j] = 1 - p_cur # somehow inversed
+                    
+
+
+
+        return current_num_of_feature_for_priviledge, current_num_of_feature_for_unpriviledge
+
+
+
     def run_algo_in_parallel(self, new_feat_mode,
                             sensitive_name, 
                             privilige_variable_value,
@@ -318,10 +476,10 @@ class ActiveFairness(object):
                             plot_any=False, 
                             batch_size=512, 
                             nr_of_batches=100,
-                            n_jobs=-1, 
                             save_to_file=True,
                             run_on_training=False,
-                            save_folder=''):
+                            save_folder='',
+                            show_no_words = False):
 
         assert (len(save_folder) == 0) or (save_to_file)
         
@@ -352,8 +510,8 @@ class ActiveFairness(object):
 
             if start >= X_te.shape[0]:
                 break
-
-            print('START',start, 'END', end)
+            if show_no_words == False:
+                print('START',start, 'END', end)
             results_one = [run_per_test_case(i, X_tr, y_tr, X_te, y_te, X_sensi_te, sensitive_name, privilige_variable_value, \
                 unprivilige_variable_value, pri_num_feature_fetched, un_pri_num_feature_fetched, self.feature2columnmap, \
                 verbose, new_feat_mode, clf, start_time2, all_features, features_by_importance, self.trees) for i in np.arange(start,end)]
@@ -482,7 +640,6 @@ def run_per_test_case(test_case_id, X_tr, y_tr, X_te, y_te, X_sensi_te, sensitiv
 def ClassifyWithPartialFeatures(sampleData,tree, previous_answers, new_feature, only_norm_prob = False):
     # only_norm_prob is for accelerating
     value = sampleData[new_feature]
-    # assert np.isnan(value) == False, "Value error in ClassifyWithPartialFeatures"
     l = len(tree.feature2threshold_list[new_feature])
     if l > 0:
         if value > tree.feature2threshold_list[new_feature][l - 1]:
